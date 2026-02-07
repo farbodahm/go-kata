@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  find-modules:
+    runs-on: ubuntu-latest
+    outputs:
+      modules: ${{ steps.find.outputs.modules }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find all Go modules
+        id: find
+        run: |
+          MODULES=$(find . -name 'go.mod' -exec dirname {} \; | sort | jq -R -s -c 'split("\n") | map(select(. != ""))')
+          echo "modules=$MODULES" >> "$GITHUB_OUTPUT"
+
+  lint-and-test:
+    needs: find-modules
+    if: needs.find-modules.outputs.modules != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: ${{ fromJson(needs.find-modules.outputs.modules) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+
+      - name: Check formatting
+        working-directory: ${{ matrix.module }}
+        run: |
+          UNFORMATTED=$(gofmt -l .)
+          if [ -n "$UNFORMATTED" ]; then
+            echo "Files not formatted:"
+            echo "$UNFORMATTED"
+            gofmt -d .
+            exit 1
+          fi
+
+      - name: Run tests
+        working-directory: ${{ matrix.module }}
+        run: go test -race -v ./...
