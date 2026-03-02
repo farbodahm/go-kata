@@ -1,6 +1,7 @@
 package shardedmap
 
 import (
+	"encoding/binary"
 	"hash/fnv"
 	"sync"
 )
@@ -17,43 +18,75 @@ type ShardedMap[K comparable, V any] struct {
 // NewShardedMap creates a new ShardedMap with the given number of shards.
 // Each shard is initialized with its own map and RWMutex.
 func NewShardedMap[K comparable, V any](shardCount int) *ShardedMap[K, V] {
-	// TODO: Implement
-	return nil
+	locks := make([]sync.RWMutex, shardCount)
+	shards := make([]map[K]V, shardCount)
+	for i := range shards {
+		shards[i] = make(map[K]V)
+	}
+
+	return &ShardedMap[K, V]{
+		shards: shards,
+		locks:  locks,
+		count:  shardCount,
+	}
 }
 
 // Get retrieves a value by key. Returns the value and whether it was found.
-// Hint: use RLock for read operations.
 func (m *ShardedMap[K, V]) Get(key K) (V, bool) {
-	// TODO: Implement
-	var zero V
-	return zero, false
+	index := m.shardIndex(key)
+	m.locks[index].RLock()
+	defer m.locks[index].RUnlock()
+
+	value, found := m.shards[index][key]
+	return value, found
 }
 
 // Set inserts or updates a key-value pair.
 func (m *ShardedMap[K, V]) Set(key K, value V) {
-	// TODO: Implement
+	index := m.shardIndex(key)
+	m.locks[index].Lock()
+	defer m.locks[index].Unlock()
+
+	m.shards[index][key] = value
 }
 
 // Delete removes a key from the map.
 func (m *ShardedMap[K, V]) Delete(key K) {
-	// TODO: Implement
+	index := m.shardIndex(key)
+	m.locks[index].Lock()
+	defer m.locks[index].Unlock()
+
+	delete(m.shards[index], key)
 }
 
 // Keys returns all keys across all shards. Order is not guaranteed.
-// Hint: must be safe to call concurrently with writes.
 func (m *ShardedMap[K, V]) Keys() []K {
-	// TODO: Implement
-	return nil
+	var keys []K
+	for i := range m.shards {
+		// TODO: This is still not safe, as by the time of iteration, the shard could have been modified.
+		m.locks[i].RLock()
+		for key := range m.shards[i] {
+			keys = append(keys, key)
+		}
+		m.locks[i].RUnlock()
+	}
+
+	return keys
 }
 
 // shardIndex returns the shard index for the given key using FNV-64a hashing.
-// Hint: convert the key to bytes in a way that avoids allocations on the hot path.
-// You can use hash/fnv and the encoding/binary package.
 func (m *ShardedMap[K, V]) shardIndex(key K) int {
-	// TODO: Implement
-	return 0
-}
+	h := fnv.New64a()
+	switch v := any(key).(type) {
+	case int:
+		var buf [8]byte
+		binary.LittleEndian.PutUint64(buf[:], uint64(v))
+		h.Write(buf[:])
+	case string:
+		h.Write([]byte(v))
+	default:
+		panic("unsupported key type")
+	}
 
-// Ensure hash/fnv and sync are used (remove these once you use them in your implementation).
-var _ = fnv.New64a
-var _ sync.RWMutex
+	return int(h.Sum64() % uint64(m.count))
+}
