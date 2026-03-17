@@ -23,13 +23,9 @@ func startTestServer(t *testing.T, opts ...Option) (*Server, string, context.Can
 
 	go func() { _ = srv.Start(ctx) }()
 
-	time.Sleep(200 * time.Millisecond)
+	<-srv.Ready()
 
-	addr := srv.httpServer.Addr
-	if addr == ":0" || addr == "" {
-		t.Fatal("server did not expose its listening address")
-	}
-	base := fmt.Sprintf("http://localhost%s", addr)
+	base := fmt.Sprintf("http://localhost%s", srv.httpServer.Addr)
 
 	return srv, base, cancel
 }
@@ -51,7 +47,7 @@ func TestServer_StartAndStop(t *testing.T) {
 		errCh <- srv.Start(ctx)
 	}()
 
-	time.Sleep(300 * time.Millisecond)
+	<-srv.Ready()
 	cancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -126,7 +122,8 @@ func TestServer_NoGoroutineLeaks(t *testing.T) {
 
 	go func() { _ = srv.Start(ctx) }()
 
-	time.Sleep(500 * time.Millisecond)
+	<-srv.Ready()
+	time.Sleep(200 * time.Millisecond)
 	cancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -190,6 +187,15 @@ func TestServer_ShutdownOrder(t *testing.T) {
 		t.Errorf("Stop() error: %v", err)
 	}
 
-	// TODO: Assert shutdown order — expected: ["http", "workers", "warmer", "db"]
-	t.Log("verify shutdown order manually or add order tracking to assert programmatically")
+	expected := []string{"http", "workers", "warmer", "db"}
+	order := srv.ShutdownOrder()
+
+	if len(order) != len(expected) {
+		t.Fatalf("shutdown order length: got %d, want %d (%v)", len(order), len(expected), order)
+	}
+	for i := range expected {
+		if order[i] != expected[i] {
+			t.Errorf("shutdown step %d: got %q, want %q (full order: %v)", i, order[i], expected[i], order)
+		}
+	}
 }

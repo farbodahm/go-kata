@@ -110,8 +110,13 @@ type Server struct {
 	warmer     *CacheWarmer
 	wg         sync.WaitGroup
 
-	jobs chan job
-	quit chan struct{}
+	warmerCancel context.CancelFunc
+	warmerDone   chan struct{}
+
+	jobs          chan job
+	quit          chan struct{}
+	ready         chan struct{}
+	shutdownOrder []string
 }
 
 func NewServer(opts ...Option) (*Server, error) {
@@ -138,6 +143,8 @@ func NewServer(opts ...Option) (*Server, error) {
 
 	s.jobs = make(chan job)
 	s.quit = make(chan struct{})
+	s.ready = make(chan struct{})
+	s.warmerDone = make(chan struct{})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleRequest)
@@ -173,11 +180,23 @@ func (s *Server) Start(ctx context.Context) error {
 		go s.worker(i)
 	}
 
-	go s.warmer.Run(ctx)
+	warmerCtx, warmerCancel := context.WithCancel(context.Background())
+	s.warmerCancel = warmerCancel
+	go func() {
+		s.warmer.Run(warmerCtx)
+		close(s.warmerDone)
+	}()
 
 	s.logger.Printf("server listening on %s", s.httpServer.Addr)
+	close(s.ready)
+
 	<-ctx.Done()
 	return nil
+}
+
+// Ready returns a channel that is closed once the server is listening.
+func (s *Server) Ready() <-chan struct{} {
+	return s.ready
 }
 
 func (s *Server) worker(id int) {
@@ -197,21 +216,18 @@ func (s *Server) Stop(ctx context.Context) error {
 	s.logger.Println("shutting down")
 	var shutdownErr error
 
-	// 1. Stop accepting new connections
 	if err := s.httpServer.Shutdown(ctx); err != nil {
 		s.httpServer.Close()
 		shutdownErr = fmt.Errorf("http shutdown: %w", err)
 	}
+	s.shutdownOrder = append(s.shutdownOrder, "http")
 
-	// 2. Drain worker pool
 	close(s.quit)
-
 	workersDone := make(chan struct{})
 	go func() {
 		s.wg.Wait()
 		close(workersDone)
 	}()
-
 	select {
 	case <-workersDone:
 	case <-ctx.Done():
@@ -219,15 +235,28 @@ func (s *Server) Stop(ctx context.Context) error {
 			shutdownErr = fmt.Errorf("shutdown timeout: %w", ctx.Err())
 		}
 	}
+	s.shutdownOrder = append(s.shutdownOrder, "workers")
 
-	// 3. Cache warmer already stopped via context cancellation
+	s.warmerCancel()
+	select {
+	case <-s.warmerDone:
+	case <-ctx.Done():
+		if shutdownErr == nil {
+			shutdownErr = fmt.Errorf("shutdown timeout waiting for warmer: %w", ctx.Err())
+		}
+	}
+	s.shutdownOrder = append(s.shutdownOrder, "warmer")
 
-	// 4. Close database connections
 	if err := s.db.Close(); err != nil && shutdownErr == nil {
 		shutdownErr = fmt.Errorf("db close: %w", err)
 	}
+	s.shutdownOrder = append(s.shutdownOrder, "db")
 
 	return shutdownErr
+}
+
+func (s *Server) ShutdownOrder() []string {
+	return s.shutdownOrder
 }
 
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
